@@ -6,6 +6,7 @@ import { GameUI, LevelView } from './ui/UI';
 import { CubeState, LayerMove } from './game/CubeState';
 import { computeFlow, FlowResult } from './game/Flow';
 import { buildSolved, LEVELS, levelByIndex } from './game/levels';
+import { GameAudio } from './audio/Audio';
 
 interface SaveData {
   gems: number;
@@ -38,6 +39,7 @@ export class App {
   private view: CubeView;
   private controls: Controls;
   private ui: GameUI;
+  private audio = new GameAudio();
 
   private save: SaveData;
   private index = 0;
@@ -66,13 +68,32 @@ export class App {
     this.save = loadSave();
 
     this.ui = new GameUI(uiRoot, {
-      onUndo: () => this.undo(),
-      onReset: () => this.reset(),
-      onHint: () => this.hint(),
-      onMenu: () => {},
-      onNextLevel: () => this.next(),
+      onUndo: () => {
+        this.audio.tick();
+        this.undo();
+      },
+      onReset: () => {
+        this.audio.tick();
+        this.reset();
+      },
+      onHint: () => {
+        this.audio.tick();
+        this.hint();
+      },
+      onMenu: () => this.audio.tick(),
+      onNextLevel: () => {
+        this.audio.tick();
+        this.next();
+      },
       onSelectLevel: (i) => this.loadLevel(i),
     });
+
+    // Unlock the audio context on the first user gesture (iOS requirement).
+    const unlock = () => {
+      this.audio.unlock();
+      window.removeEventListener('pointerdown', unlock);
+    };
+    window.addEventListener('pointerdown', unlock);
 
     this.controls = new Controls(
       canvas,
@@ -161,6 +182,7 @@ export class App {
     this.controls.setLocked(false);
 
     this.recompute(true);
+    this.view.playIntro();
     this.ui.hideWin();
     this.ui.loadLevel(this.levelView());
     this.ui.setProgress(this.flow.reachedSinks.length, this.flow.totalSinks);
@@ -194,10 +216,20 @@ export class App {
 
   private doMove(m: LayerMove, fromHint: boolean) {
     if (this.won) return;
+    const prevReached = this.flow.reachedSinks.length;
+    const prevLeaks = this.flow.leaks;
+
     this.cube.rotateLayer(m.axis, m.layer, m.turns);
     this.history.push(m);
     this.trackSolution(m);
     this.recompute(true);
+
+    // feedback
+    this.audio.snap();
+    if (navigator.vibrate) navigator.vibrate(8);
+    if (this.flow.reachedSinks.length > prevReached) this.audio.splash(0.7);
+    else if (this.flow.leaks > prevLeaks) this.audio.thud();
+
     this.ui.setProgress(this.flow.reachedSinks.length, this.flow.totalSinks);
     if (this.history.length >= 1) this.ui.dismissHints();
     if (fromHint) this.ui.toast('HINT');
@@ -269,6 +301,7 @@ export class App {
     }
     this.persist();
 
+    this.audio.win();
     setTimeout(() => this.ui.showWin(stars, award, this.save.gems), 650);
     if ('vibrate' in navigator) navigator.vibrate?.([10, 40, 18]);
   }
@@ -280,6 +313,7 @@ export class App {
 
   private resize() {
     this.scene.resize(window.innerWidth, window.innerHeight);
+    this.view.setResolution(window.innerWidth, window.innerHeight);
   }
 
   private loop = (now: number) => {
@@ -287,6 +321,7 @@ export class App {
     this.lastTime = now;
 
     this.controls.update(dt);
+    this.scene.tick(now / 1000);
     this.view.update(dt, now / 1000);
 
     if (this.started && !this.won) {

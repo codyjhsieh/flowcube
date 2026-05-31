@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeometry.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 import { CubeState, NO_FACE, SINK, SOURCE } from '../game/CubeState';
 import { FlowResult } from '../game/Flow';
 import { ALL_BITS, Axis, DIRS } from '../game/dir';
@@ -24,6 +27,25 @@ interface PickResult {
 }
 
 // ---- shared, cached resources (never disposed; cheap to reuse) -------------
+// Toon gradient ramp gives the cube a hand-shaded, illustrated look.
+function makeToonGradient(): THREE.Texture {
+  const c = document.createElement('canvas');
+  c.width = 5;
+  c.height = 1;
+  const ctx = c.getContext('2d')!;
+  const stops = ['#9a9a9a', '#bcbcbc', '#dadada', '#f0f0f0', '#ffffff'];
+  for (let i = 0; i < stops.length; i++) {
+    ctx.fillStyle = stops[i];
+    ctx.fillRect(i, 0, 1, 1);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.minFilter = THREE.NearestFilter;
+  t.magFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  return t;
+}
+const toonGrad = makeToonGradient();
+
 const sphereGeo = new THREE.SphereGeometry(1, 14, 12);
 const dropGeo = new THREE.IcosahedronGeometry(1, 0);
 const cylGeo = new THREE.CylinderGeometry(1, 1, 1, 12, 1, true);
@@ -75,10 +97,9 @@ function terrainGeo(size: number, grassy: boolean): THREE.BufferGeometry {
   terrainCache.set(key, g);
   return g;
 }
-const grassDirtMat = new THREE.MeshStandardMaterial({
+const grassDirtMat = new THREE.MeshToonMaterial({
   vertexColors: true,
-  roughness: 0.95,
-  metalness: 0,
+  gradientMap: toonGrad,
 });
 
 
@@ -100,6 +121,42 @@ const edgeMat = new THREE.LineBasicMaterial({
   transparent: true,
   opacity: 0.85,
 });
+
+// Bold, slightly-wobbled "ink" outline (fat lines in world units) for the
+// hand-drawn look. World units keep the stroke weight consistent under the
+// orthographic camera without needing per-resize resolution updates.
+const inkMat = new LineMaterial({
+  color: PALETTE.edge,
+  linewidth: 0.03,
+  worldUnits: true,
+  transparent: true,
+  opacity: 0.92,
+});
+inkMat.resolution.set(window.innerWidth, window.innerHeight);
+
+const inkCache = new Map<number, LineSegmentsGeometry>();
+function inkOutlineGeo(size: number): LineSegmentsGeometry {
+  let g = inkCache.get(size);
+  if (g) return g;
+  const eg = new THREE.EdgesGeometry(
+    new THREE.BoxGeometry(size, size, size),
+    30
+  );
+  const pos = eg.getAttribute('position');
+  const arr: number[] = [];
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i),
+      y = pos.getY(i),
+      z = pos.getZ(i);
+    // deterministic hand-wobble so the same cube always draws the same line
+    const h = Math.sin((x * 91.7 + y * 47.3 + z * 13.1) * 51.0);
+    const j = (h - Math.floor(h) - 0.5) * 0.02;
+    arr.push(x + j, y + j * 0.6, z - j * 0.5);
+  }
+  g = new LineSegmentsGeometry().setPositions(arr);
+  inkCache.set(size, g);
+  return g;
+}
 const highlightEdgeMat = new THREE.LineBasicMaterial({
   color: PALETTE.waterBright,
   transparent: true,
@@ -112,15 +169,13 @@ const highlightFaceMat = new THREE.MeshBasicMaterial({
   depthWrite: false,
   blending: THREE.AdditiveBlending,
 });
-const grooveMat = new THREE.MeshStandardMaterial({
+const grooveMat = new THREE.MeshToonMaterial({
   color: PALETTE.groove,
-  roughness: 0.9,
-  metalness: 0,
+  gradientMap: toonGrad,
 });
-const trenchMat = new THREE.MeshStandardMaterial({
+const trenchMat = new THREE.MeshToonMaterial({
   color: PALETTE.grooveDark,
-  roughness: 0.98,
-  metalness: 0,
+  gradientMap: toonGrad,
 });
 // GPU-cheap flowing water: one shared shader, animated by a single uTime
 // uniform. Scrolling bright bands give directional flow; a fresnel rim makes
@@ -132,8 +187,8 @@ const waterMat = new THREE.ShaderMaterial({
     uColor: { value: new THREE.Color(PALETTE.water) },
     uBright: { value: new THREE.Color(PALETTE.waterBright) },
     uDeep: { value: new THREE.Color(PALETTE.waterDeep) },
-    uSpeed: { value: 1.6 },
-    uOpacity: { value: 0.97 },
+    uSpeed: { value: 1.05 },
+    uOpacity: { value: 0.93 },
     uAmp: { value: 0.04 },
   },
   side: THREE.DoubleSide,
@@ -178,28 +233,31 @@ const waterMat = new THREE.ShaderMaterial({
       float x = vUv.x;       // across the channel
       float tt = uTime;
 
-      // The flow centreline meanders like a river (domain warp on y).
-      float meander = 0.10 * sin(y * 9.0 + tt * 2.0)
-                    + 0.05 * sin(y * 19.0 - tt * 3.3);
-      float flow = y * 2.6 - tt * uSpeed + meander;
-      float t = fract(flow);
-      float band = smoothstep(0.26, 0.5, t) - smoothstep(0.5, 0.76, t);
+      // Gentle drifting flow highlight (subtle, not a strobe).
+      float meander = 0.05 * sin(y * 8.0 + tt * 1.3);
+      float flow = fract(y * 2.0 - tt * uSpeed + meander);
+      float band = smoothstep(0.30, 0.5, flow) - smoothstep(0.5, 0.72, flow);
 
-      // Layered turbulence -> churning surface + foam crests.
-      float turb = 0.50 * sin(y * 23.0 - tt * 7.0 + x * 6.0);
-      turb += 0.30 * sin(y * 39.0 + tt * 5.0 - x * 11.0);
-      turb += 0.20 * sin(y * 63.0 - tt * 9.5 + x * 3.0 + meander * 8.0);
-      turb = 0.5 + 0.5 * turb;                 // -> 0..1
-      float foam = smoothstep(0.72, 0.96, turb * (0.55 + 0.7 * band));
-      float crest = smoothstep(0.35, 0.9, vWave * 0.5 + 0.5); // wave-top foam
+      // Calm turbulence for life.
+      float turb = 0.5 * sin(y * 16.0 - tt * 3.5 + x * 5.0)
+                 + 0.3 * sin(y * 28.0 + tt * 2.6 - x * 8.0);
+      turb = 0.5 + 0.5 * turb;
 
+      // Depth: deeper teal toward the centre of the channel, lighter near banks.
+      float centre = 1.0 - clamp(abs(x - 0.5) * 2.0, 0.0, 1.0);
+      vec3 col = mix(uColor, uDeep, centre * 0.65);
+      col = mix(col, uBright, band * 0.45);
+
+      // Soft white foam: along the banks and on the moving wave crests.
+      float bankFoam = smoothstep(0.80, 1.0, abs(x - 0.5) * 2.0);
+      float crestFoam = smoothstep(0.55, 0.95, turb * (0.4 + 0.7 * band));
+      float foam = clamp(bankFoam + crestFoam * 0.5, 0.0, 0.7);
+      col = mix(col, vec3(0.93, 0.98, 1.0), foam);
+
+      // Subtle glassy rim, much gentler than before.
       float fres = pow(1.0 - max(dot(vN, vView), 0.0), 2.0);
+      col += uBright * fres * 0.22;
 
-      vec3 col = mix(uDeep, uColor, 0.45 + 0.55 * turb);
-      col = mix(col, uBright, band * 0.8);
-      col += uBright * foam * 0.6;             // churning crests
-      col += uBright * crest * 0.35;           // foam on wave tops
-      col += uBright * fres * 0.5;             // glassy rim
       gl_FragColor = vec4(col, uOpacity);
     }
   `,
@@ -215,30 +273,25 @@ const waterDropMat = new THREE.MeshBasicMaterial({
   transparent: true,
   opacity: 0.95,
 });
-const sourceRingMat = new THREE.MeshStandardMaterial({
+const sourceRingMat = new THREE.MeshToonMaterial({
   color: PALETTE.sourceRing,
-  roughness: 0.5,
+  gradientMap: toonGrad,
 });
 
-const cubeletMatCache = new Map<number, THREE.MeshStandardMaterial>();
-function cubeletMat(color: number): THREE.MeshStandardMaterial {
+const cubeletMatCache = new Map<number, THREE.MeshToonMaterial>();
+function cubeletMat(color: number): THREE.MeshToonMaterial {
   let m = cubeletMatCache.get(color);
   if (!m) {
-    m = new THREE.MeshStandardMaterial({
-      color,
-      roughness: 0.82,
-      metalness: 0,
-      flatShading: false,
-    });
+    m = new THREE.MeshToonMaterial({ color, gradientMap: toonGrad });
     cubeletMatCache.set(color, m);
   }
   return m;
 }
-const ringMatCache = new Map<number, THREE.MeshStandardMaterial>();
-function ringMat(color: number): THREE.MeshStandardMaterial {
+const ringMatCache = new Map<number, THREE.MeshToonMaterial>();
+function ringMat(color: number): THREE.MeshToonMaterial {
   let m = ringMatCache.get(color);
   if (!m) {
-    m = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0 });
+    m = new THREE.MeshToonMaterial({ color, gradientMap: toonGrad });
     ringMatCache.set(color, m);
   }
   return m;
@@ -257,6 +310,7 @@ export class CubeView {
   private fillItems: { obj: THREE.Object3D; base: THREE.Vector3; delay: number }[] =
     [];
   private fillClock = 0;
+  private introT = 1; // 0..1 level-entrance animation
   private size = SPACING * 0.9;
 
   constructor(root: THREE.Group) {
@@ -330,8 +384,9 @@ export class CubeView {
           group.add(body);
           this.pickList.push(body);
 
-          const edges = new THREE.LineSegments(edgeGeo(this.size), edgeMat);
-          group.add(edges);
+          const ink = new LineSegments2(inkOutlineGeo(this.size), inkMat);
+          ink.computeLineDistances();
+          group.add(ink);
 
           if (ports === 0) continue;
 
@@ -514,9 +569,29 @@ export class CubeView {
   }
 
   // ---- animation ----------------------------------------------------------
+  /** Trigger the level-entrance pop (call on load, not on every rebuild). */
+  playIntro() {
+    this.introT = 0;
+  }
+
+  /** Keep the fat-line outline stroke crisp across viewport sizes. */
+  setResolution(w: number, h: number) {
+    inkMat.resolution.set(w, h);
+  }
+
   update(dt: number, time: number) {
     waterMat.uniforms.uTime.value = time;
     waterMatStill.uniforms.uTime.value = time;
+
+    // Level entrance: spring the cube up into place.
+    if (this.introT < 1) {
+      this.introT = Math.min(1, this.introT + dt / 0.45);
+      const e = 1 - Math.pow(1 - this.introT, 3);
+      const s = 0.72 + 0.28 * e;
+      this.root.scale.setScalar(s);
+      this.root.position.y = (1 - e) * -0.6;
+      this.root.rotation.y = (1 - e) * -0.25;
+    }
 
     // Flow propagation: reveal water cell-by-cell from the source outward so it
     // visibly rushes through newly connected canals rather than popping in.

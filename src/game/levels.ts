@@ -130,7 +130,7 @@ export function buildSolved(def: LevelDef): {
         const c = key(x, y, z);
         if (network.has(c)) continue;
         if (!isShell(n, x, y, z)) continue;
-        if (rand() < 0.8) fillerSet.add(c);
+        if (rand() < 0.45) fillerSet.add(c);
       }
 
   const fillerPorts = new Map<number, number>();
@@ -152,7 +152,7 @@ export function buildSolved(def: LevelDef): {
       const nc = key(nx, ny, nz);
       if (nc <= c) continue; // handle each pair once
       if (!fillerSet.has(nc)) continue;
-      if (rand() < 0.78) {
+      if (rand() < 0.5) {
         fAdd(c, di);
         fAdd(nc, di ^ 1);
       }

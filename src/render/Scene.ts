@@ -15,6 +15,8 @@ export class Scene {
   private frustum = 6.4;
   private baseDir = new THREE.Vector3(1, 0.82, 1).normalize();
   private orbit = { az: 0, el: 0 }; // small peek offsets (radians)
+  private idleAz = 0;
+  private idleEl = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.renderer = new THREE.WebGLRenderer({
@@ -33,15 +35,18 @@ export class Scene {
     this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 100);
     this.updateCamera();
 
-    // Lighting: soft ambient + one key directional, toon-friendly.
-    const amb = new THREE.AmbientLight(0xffffff, 0.92);
+    // Lighting: soft sky/ground hemisphere for gentle form + a warm key and a
+    // cool rim, so the toon ramp reads as a hand-shaded toy rather than flat.
+    const hemi = new THREE.HemisphereLight(0xfff4d6, 0x6f7a55, 0.7);
+    this.scene.add(hemi);
+    const amb = new THREE.AmbientLight(0xffffff, 0.28);
     this.scene.add(amb);
-    const key = new THREE.DirectionalLight(0xffffff, 0.85);
-    key.position.set(2.5, 4, 1.8);
+    const key = new THREE.DirectionalLight(0xfff1d0, 0.95); // warm sun
+    key.position.set(2.8, 4.2, 2.2);
     this.scene.add(key);
-    const fill = new THREE.DirectionalLight(0xbfe0ff, 0.25);
-    fill.position.set(-2, 1, -2.5);
-    this.scene.add(fill);
+    const rim = new THREE.DirectionalLight(0xbfe6ff, 0.35); // cool back rim
+    rim.position.set(-2.5, 1.5, -2.8);
+    this.scene.add(rim);
 
     // Fake blob shadow on the ground.
     const shadowTex = makeBlobTexture();
@@ -76,9 +81,21 @@ export class Scene {
     return { ...this.orbit };
   }
 
+  /** Gentle idle breathing so the scene feels alive when untouched. */
+  tick(t: number) {
+    this.idleAz = Math.sin(t * 0.35) * 0.03;
+    this.idleEl = Math.sin(t * 0.27 + 1.3) * 0.018;
+    this.updateCamera();
+  }
+
   private updateCamera() {
     const dir = this.baseDir.clone();
-    const e = new THREE.Euler(this.orbit.el, this.orbit.az, 0, 'YXZ');
+    const e = new THREE.Euler(
+      this.orbit.el + this.idleEl,
+      this.orbit.az + this.idleAz,
+      0,
+      'YXZ'
+    );
     dir.applyEuler(e);
     const dist = 14;
     this.camera.position.copy(dir.multiplyScalar(dist));
