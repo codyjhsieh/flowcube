@@ -345,13 +345,111 @@ export class CubeView {
             fd !== NO_FACE && isExposedFace(x, y, z, fd, n)
               ? dirVec(DIRS[fd])
               : outerNormal(x, y, z, n);
-          // Surface reference planes. R = cubelet face. A shallow dark groove
-          // sits just below the surface; the water surface sits ABOVE the groove
-          // so it is never occluded by the groove walls.
+          // R = cubelet face. Canals are walled channels carved on the face.
           const R = this.size * 0.5;
-          const bedH = nrm.clone().multiplyScalar(R - 0.03); // groove floor (sunk)
-          const watH = nrm.clone().multiplyScalar(R + 0.05); // water surface (proud)
           const half = SPACING * 0.5;
+          const floorH = nrm.clone().multiplyScalar(R - 0.01); // channel floor
+          const waterH = nrm.clone().multiplyScalar(R + 0.05); // water surface
+          const wallH = nrm.clone().multiplyScalar(R + 0.04); // raised wall centre
+          const UP = new THREE.Vector3(0, 1, 0);
+          const FWD = new THREE.Vector3(0, 0, 1);
+
+          // A walled canal arm running from the cell centre toward `dir`.
+          const drawArm = (dir: THREE.Vector3, len: number, isFilled: boolean) => {
+            const wb = new THREE.Vector3().crossVectors(nrm, dir);
+            if (wb.lengthSq() < 1e-4) {
+              // port runs along the normal (into the cube) -> short tube
+              const tube = new THREE.Mesh(
+                cylGeo,
+                isFilled ? waterMatStill : grooveMat
+              );
+              tube.scale.set(isFilled ? 0.14 : 0.12, len, isFilled ? 0.14 : 0.12);
+              tube.quaternion.setFromUnitVectors(UP, dir);
+              tube.position.copy(waterH).addScaledVector(dir, len * 0.5);
+              group.add(tube);
+              if (isFilled) regFill(tube);
+              return;
+            }
+            wb.normalize();
+            const boxB = new THREE.Matrix4().makeBasis(wb, nrm, dir); // right-handed
+            // channel floor
+            const floor = new THREE.Mesh(unitBox, trenchMat);
+            floor.quaternion.setFromRotationMatrix(boxB);
+            floor.scale.set(0.3, 0.06, len);
+            floor.position.copy(floorH).addScaledVector(dir, len * 0.5);
+            group.add(floor);
+            // two raised walls framing the channel
+            for (const s of [1, -1]) {
+              const wall = new THREE.Mesh(unitBox, trenchMat);
+              wall.quaternion.setFromRotationMatrix(boxB);
+              wall.scale.set(0.06, 0.2, len);
+              wall.position
+                .copy(wallH)
+                .addScaledVector(dir, len * 0.5)
+                .addScaledVector(wb, 0.15 * s);
+              group.add(wall);
+            }
+            // water surface (displaced plane) or empty groove
+            if (isFilled) {
+              const surf = new THREE.Mesh(waterSurfaceGeo, waterMat);
+              // RIGHT-handed basis (col0 x col1 == col2): (dir x nrm) x dir == nrm
+              const planeB = new THREE.Matrix4().makeBasis(
+                wb.clone().negate(),
+                dir,
+                nrm
+              );
+              surf.quaternion.setFromRotationMatrix(planeB);
+              surf.scale.set(0.22, len, 1);
+              surf.position.copy(waterH).addScaledVector(dir, len * 0.5);
+              group.add(surf);
+              regFill(surf);
+            } else {
+              const ribbon = new THREE.Mesh(unitBox, grooveMat);
+              ribbon.quaternion.setFromRotationMatrix(boxB);
+              ribbon.scale.set(0.2, 0.05, len);
+              ribbon.position.copy(floorH).addScaledVector(dir, len * 0.5);
+              group.add(ribbon);
+            }
+          };
+
+          // An outlet/leak hole seated on the cell's `dir` face.
+          const drawHole = (dir: THREE.Vector3, isFilled: boolean) => {
+            const isOutlet = isSource || isSink;
+            const rmat = isSource
+              ? sourceRingMat
+              : isSink
+                ? ringMat(accent)
+                : trenchMat;
+            const hole = new THREE.Mesh(holeGeo, holeMat);
+            hole.quaternion.setFromUnitVectors(FWD, dir);
+            hole.position.copy(dir).multiplyScalar(R + 0.012);
+            hole.scale.setScalar(isOutlet ? 1.0 : 0.6);
+            hole.renderOrder = 2;
+            group.add(hole);
+            const ring = new THREE.Mesh(ringGeo, rmat);
+            ring.quaternion.setFromUnitVectors(FWD, dir);
+            ring.position.copy(dir).multiplyScalar(R + 0.03);
+            ring.scale.setScalar(isSource ? 1.0 : isSink ? 1.12 : 0.58);
+            ring.renderOrder = 3;
+            group.add(ring);
+            if (isFilled) {
+              const plug = new THREE.Mesh(cylGeo, waterMatStill);
+              const pr = isOutlet ? 0.16 : 0.1;
+              plug.scale.set(pr, 0.3, pr);
+              plug.quaternion.setFromUnitVectors(UP, dir);
+              plug.position.copy(dir).multiplyScalar(R + 0.1);
+              plug.renderOrder = 2;
+              group.add(plug);
+              regFill(plug);
+              this.addEmitter(
+                group,
+                dir,
+                isSource ? 'fountain' : 'spurt',
+                dir.clone().multiplyScalar(R + 0.14),
+                fillDelay
+              );
+            }
+          };
 
           for (let di = 0; di < 6; di++) {
             if (!(ports & ALL_BITS[di])) continue;
@@ -362,115 +460,28 @@ export class CubeView {
               nz = z + d.z;
             const outside =
               nx < 0 || nx >= n || ny < 0 || ny >= n || nz < 0 || nz >= n;
+            const along = dir.dot(nrm);
 
-            if (outside) {
-              // Exterior port. Source/sink show a coloured outlet; any other
-              // cell is a decoy opening that leaks if water reaches it.
-              const isOutlet = isSource || isSink;
-              // sit the outlet proud of the canal joint so it's never buried
-              const rmat = isSource
-                ? sourceRingMat
-                : isSink
-                  ? ringMat(accent)
-                  : trenchMat;
-              const hole = new THREE.Mesh(holeGeo, holeMat);
-              hole.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
-              hole.position.copy(dir).multiplyScalar(R + 0.07);
-              hole.scale.setScalar(isOutlet ? 1.05 : 0.66);
-              hole.renderOrder = 2;
-              group.add(hole);
+            // Draw a canal toward every port that lies in the face plane — this
+            // includes outlet ports, so a hole always has a channel leading to
+            // it. Ports along the normal are either the vertical spout (outward,
+            // no arm) or a hidden inward link (short tube).
+            if (Math.abs(along) < 0.5) drawArm(dir, outside ? half : half + 0.04, filled);
+            else if (along <= -0.5) drawArm(dir, half * 0.7, filled);
 
-              const ring = new THREE.Mesh(ringGeo, rmat);
-              ring.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
-              ring.position.copy(dir).multiplyScalar(R + 0.075);
-              ring.scale.setScalar(isSource ? 1.0 : isSink ? 1.12 : 0.66);
-              ring.renderOrder = 3;
-              group.add(ring);
-
-              if (filled) {
-                // bright water nub poking out of the mouth, then the stream/leak
-                const plug = new THREE.Mesh(cylGeo, waterMatStill);
-                const pr = isOutlet ? 0.17 : 0.11;
-                plug.scale.set(pr, 0.34, pr);
-                plug.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-                plug.position.copy(dir).multiplyScalar(R + 0.12);
-                plug.renderOrder = 2;
-                group.add(plug);
-                regFill(plug);
-                this.addEmitter(
-                  group,
-                  dir,
-                  isSource ? 'fountain' : 'spurt',
-                  dir.clone().multiplyScalar(R + 0.16),
-                  fillDelay
-                );
-              }
-              continue;
-            }
-
-            // Interior connection running across the face.
-            const len = half + 0.04;
-            const cross = new THREE.Vector3().crossVectors(nrm, dir);
-            if (cross.lengthSq() < 1e-4) {
-              // Port runs along the face normal (can't lie flat). Draw a short
-              // connector tube so the link is still visible rather than NaN.
-              const tube = new THREE.Mesh(
-                cylGeo,
-                filled ? waterMatStill : grooveMat
-              );
-              tube.scale.set(filled ? 0.16 : 0.13, len, filled ? 0.16 : 0.13);
-              tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-              tube.position.copy(watH).addScaledVector(dir, len * 0.5);
-              group.add(tube);
-              if (filled) regFill(tube);
-              continue;
-            }
-            const wAxis = cross.normalize();
-            const basis = new THREE.Matrix4().makeBasis(wAxis, nrm, dir);
-
-            // shallow dark groove (sunk below the surface, frames the water)
-            const bed = new THREE.Mesh(unitBox, trenchMat);
-            bed.quaternion.setFromRotationMatrix(basis);
-            bed.scale.set(0.34, 0.1, len);
-            bed.position.copy(bedH).addScaledVector(dir, len * 0.5);
-            group.add(bed);
-
-            if (filled) {
-              // a real sloshing water surface (displaced subdivided plane),
-              // sitting proud of the groove so it is clearly visible.
-              // NB: the basis must be RIGHT-handed (det +1) or setFromRotation-
-              // Matrix yields a broken/flipped quaternion. col0 x col1 == col2:
-              //   (dir x nrm) x dir == nrm  ✓
-              const surf = new THREE.Mesh(waterSurfaceGeo, waterMat);
-              const bitan = new THREE.Vector3().crossVectors(dir, nrm); // = -wAxis
-              const sbasis = new THREE.Matrix4().makeBasis(bitan, dir, nrm);
-              surf.quaternion.setFromRotationMatrix(sbasis);
-              surf.scale.set(0.26, len, 1);
-              surf.position.copy(watH).addScaledVector(dir, len * 0.5);
-              group.add(surf);
-              regFill(surf);
-            } else {
-              // empty groove bed (flat grey water-channel)
-              const ribbon = new THREE.Mesh(unitBox, grooveMat);
-              ribbon.quaternion.setFromRotationMatrix(basis);
-              ribbon.scale.set(0.22, 0.08, len);
-              ribbon.position.copy(bedH).addScaledVector(dir, len * 0.5);
-              group.add(ribbon);
-            }
+            if (outside) drawHole(dir, filled);
           }
 
           // joint hub where canals cross
           const bedHub = new THREE.Mesh(cylGeo, trenchMat);
-          bedHub.scale.set(0.22, 0.13, 0.22);
-          bedHub.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), nrm);
-          bedHub.position.copy(bedH);
+          bedHub.scale.set(0.2, 0.1, 0.2);
+          bedHub.quaternion.setFromUnitVectors(UP, nrm);
+          bedHub.position.copy(floorH);
           group.add(bedHub);
-
-          // flat hub so crossings read as continuous water, not a raised blob
           const joint = new THREE.Mesh(cylGeo, filled ? waterMatStill : grooveMat);
           joint.scale.set(filled ? 0.15 : 0.13, 0.05, filled ? 0.15 : 0.13);
-          joint.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), nrm);
-          joint.position.copy(watH);
+          joint.quaternion.setFromUnitVectors(UP, nrm);
+          joint.position.copy(waterH);
           group.add(joint);
           if (filled) regFill(joint);
         }
