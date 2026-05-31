@@ -1,4 +1,4 @@
-import { Axis, DIRS, rotatePorts, rotateVec, vecToDirIndex } from './dir';
+import { ALL_BITS, Axis, DIRS, rotatePorts, rotateVec, vecToDirIndex } from './dir';
 
 export const EMPTY = 0;
 export const PIPE = 1;
@@ -44,6 +44,11 @@ export class CubeState {
   ports: Uint8Array;
   piece: Int16Array;
   face: Uint8Array; // canal face direction index, rotates with the piece
+  // Per-port canal face: armFace[i*6 + dir] is the exposed face the canal arm
+  // for that port is drawn on (NO_FACE = none/outlet). Assigned once from the
+  // solved geometry and then rotated rigidly with the piece, so a canal never
+  // re-snaps to a different face when a layer is turned.
+  armFace: Uint8Array;
   terrain: Uint8Array; // 0 dirt, 1 grass, 255 none — rotates with the cubelet
 
   constructor(n: number) {
@@ -53,6 +58,7 @@ export class CubeState {
     this.ports = new Uint8Array(s);
     this.piece = new Int16Array(s).fill(-1);
     this.face = new Uint8Array(s).fill(NO_FACE);
+    this.armFace = new Uint8Array(s * 6).fill(NO_FACE);
     this.terrain = new Uint8Array(s).fill(NO_FACE);
   }
 
@@ -71,6 +77,7 @@ export class CubeState {
     c.ports.set(this.ports);
     c.piece.set(this.piece);
     c.face.set(this.face);
+    c.armFace.set(this.armFace);
     c.terrain.set(this.terrain);
     return c;
   }
@@ -114,6 +121,7 @@ export class CubeState {
     const newPorts = new Uint8Array(this.ports);
     const newPiece = new Int16Array(this.piece);
     const newFace = new Uint8Array(this.face);
+    const newArmFace = new Uint8Array(this.armFace);
     const newTerrain = new Uint8Array(this.terrain);
 
     // Clear the layer in the target buffers first.
@@ -128,6 +136,7 @@ export class CubeState {
         newPorts[i] = 0;
         newPiece[i] = -1;
         newFace[i] = NO_FACE;
+        for (let d = 0; d < 6; d++) newArmFace[i * 6 + d] = NO_FACE;
         newTerrain[i] = NO_FACE;
       }
     }
@@ -176,13 +185,73 @@ export class CubeState {
         const nv = rotateVec(DIRS[f], axis, t);
         newFace[ni] = vecToDirIndex(nv);
       }
+      // Rotate each port's stored canal face: the port direction and the face
+      // it lives on both turn rigidly with the piece.
+      for (let d = 0; d < 6; d++) {
+        const af = this.armFace[i * 6 + d];
+        if (af === NO_FACE) continue;
+        const nd = vecToDirIndex(rotateVec(DIRS[d], axis, t));
+        newArmFace[ni * 6 + nd] = vecToDirIndex(rotateVec(DIRS[af], axis, t));
+      }
     }
 
     this.kind = newKind;
     this.ports = newPorts;
     this.piece = newPiece;
     this.face = newFace;
+    this.armFace = newArmFace;
     this.terrain = newTerrain;
+  }
+
+  /**
+   * Assign every internal port a surface face for its canal arm, from the
+   * current geometry. Called once on the solved cube; rotateLayer then keeps the
+   * values rigid with each piece. A connection is put on the lowest-index
+   * exposed face perpendicular to it that BOTH cells share, which both endpoints
+   * compute identically — so connected arms meet, and the result rotates with
+   * the cube instead of being recomputed (and popping) on every turn.
+   */
+  assignArmFaces(): void {
+    const n = this.n;
+    const inb = (v: number) => v >= 0 && v < n;
+    const exposed = (x: number, y: number, z: number): number[] => {
+      const out: number[] = [];
+      for (let f = 0; f < 6; f++) {
+        const d = DIRS[f];
+        if (!inb(x + d.x) || !inb(y + d.y) || !inb(z + d.z)) out.push(f);
+      }
+      return out;
+    };
+    const perp = (a: number, b: number) =>
+      DIRS[a].x * DIRS[b].x + DIRS[a].y * DIRS[b].y + DIRS[a].z * DIRS[b].z === 0;
+
+    this.armFace.fill(NO_FACE);
+    for (let i = 0; i < this.kind.length; i++) {
+      const ports = this.ports[i];
+      if (!ports) continue;
+      const [x, y, z] = this.coordOf(i);
+      const my = exposed(x, y, z);
+      for (let di = 0; di < 6; di++) {
+        if (!(ports & ALL_BITS[di])) continue;
+        const d = DIRS[di];
+        const nx = x + d.x,
+          ny = y + d.y,
+          nz = z + d.z;
+        if (!inb(nx) || !inb(ny) || !inb(nz)) continue; // outlet: no arm face
+        const nb = exposed(nx, ny, nz);
+        let chosen = -1;
+        for (const f of my) {
+          if (!perp(f, di)) continue;
+          if (nb.includes(f)) {
+            chosen = f;
+            break;
+          }
+          if (chosen < 0) chosen = f;
+        }
+        if (chosen < 0) chosen = my[0] ?? di;
+        this.armFace[i * 6 + di] = chosen;
+      }
+    }
   }
 
   /** Apply a sequence of moves. */

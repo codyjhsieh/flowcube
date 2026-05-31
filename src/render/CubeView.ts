@@ -3,7 +3,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
-import { CubeState, SINK, SOURCE } from '../game/CubeState';
+import { CubeState, NO_FACE, SINK, SOURCE } from '../game/CubeState';
 import { FlowResult } from '../game/Flow';
 import { ALL_BITS, Axis, DIRS } from '../game/dir';
 import { PALETTE } from './colors';
@@ -416,9 +416,6 @@ export class CubeView {
           const myFaces = exposedOf(x, y, z);
           const vec = (di: number) =>
             new THREE.Vector3(DIRS[di].x, DIRS[di].y, DIRS[di].z);
-          const perp = (a: number, b: number) =>
-            DIRS[a].x * DIRS[b].x + DIRS[a].y * DIRS[b].y + DIRS[a].z * DIRS[b].z ===
-            0;
 
           // A walled trough arm on `faceNrm`, running from the cell centre toward
           // in-plane direction `dir` for length `len`.
@@ -581,9 +578,11 @@ export class CubeView {
           };
 
           // ---- assign each port to a surface face -------------------------
-          // Internal ports become an arm on a perpendicular face that the
-          // neighbour also exposes (so the two arms are coplanar and meet).
-          // Outward ports become an outlet/leak hole on that exposed face.
+          // The face each internal port's arm lives on is read straight from the
+          // cube's equivariant store (CubeState.armFace), which was pinned in the
+          // solved state and rotates rigidly with the piece — so a canal never
+          // re-snaps to a different face when a layer is turned. Outward ports
+          // become an outlet/leak hole on that exposed face.
           const armsOnFace = new Map<number, number[]>(); // face -> port dirs
           const activeFaces = new Set<number>();
           const outletDirs: number[] = [];
@@ -600,17 +599,8 @@ export class CubeView {
               activeFaces.add(di); // the hole + its hub live on face di
               continue;
             }
-            const nbFaces = exposedOf(nx, ny, nz);
-            let chosen = -1;
-            for (const f of myFaces) {
-              if (!perp(f, di)) continue; // arm must lie in the face plane
-              if (nbFaces.includes(f)) {
-                chosen = f; // shared face → coplanar meet, ideal
-                break;
-              }
-              if (chosen < 0) chosen = f; // fallback: still a valid exposed face
-            }
-            if (chosen < 0) chosen = myFaces[0] ?? di;
+            const stored = cube.armFace[i * 6 + di];
+            const chosen = stored !== NO_FACE ? stored : (myFaces[0] ?? di);
             if (!armsOnFace.has(chosen)) armsOnFace.set(chosen, []);
             armsOnFace.get(chosen)!.push(di);
             activeFaces.add(chosen);

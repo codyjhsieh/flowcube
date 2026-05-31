@@ -209,6 +209,9 @@ export function buildSolved(def: LevelDef): {
         cube.terrain[cube.idx(x, y, z)] = isGrassBlock(x, y, z, n) ? 1 : 0;
       }
 
+  // Pin each canal arm to a surface face now; it then rotates with its piece.
+  cube.assignArmFaces();
+
   return { cube, colors };
 }
 
