@@ -134,7 +134,7 @@ const waterMat = new THREE.ShaderMaterial({
     uDeep: { value: new THREE.Color(PALETTE.waterDeep) },
     uSpeed: { value: 1.6 },
     uOpacity: { value: 0.97 },
-    uAmp: { value: 0.06 },
+    uAmp: { value: 0.04 },
   },
   side: THREE.DoubleSide,
   vertexShader: /* glsl */ `
@@ -345,12 +345,12 @@ export class CubeView {
             fd !== NO_FACE && isExposedFace(x, y, z, fd, n)
               ? dirVec(DIRS[fd])
               : outerNormal(x, y, z, n);
-          // Surface reference planes. R = cubelet face. The canal reads as a
-          // dark groove with water sloshing in it, sitting just on the surface
-          // so it always renders (true CSG carving isn't available here).
+          // Surface reference planes. R = cubelet face. A shallow dark groove
+          // sits just below the surface; the water surface sits ABOVE the groove
+          // so it is never occluded by the groove walls.
           const R = this.size * 0.5;
-          const bedH = nrm.clone().multiplyScalar(R + 0.015); // dark groove walls
-          const watH = nrm.clone().multiplyScalar(R + 0.045); // water surface
+          const bedH = nrm.clone().multiplyScalar(R - 0.03); // groove floor (sunk)
+          const watH = nrm.clone().multiplyScalar(R + 0.05); // water surface (proud)
           const half = SPACING * 0.5;
 
           for (let di = 0; di < 6; di++) {
@@ -408,33 +408,53 @@ export class CubeView {
               continue;
             }
 
-            // Interior connection: a raised canal running across the face.
+            // Interior connection running across the face.
             const len = half + 0.04;
-            const wAxis = new THREE.Vector3().crossVectors(nrm, dir).normalize();
+            const cross = new THREE.Vector3().crossVectors(nrm, dir);
+            if (cross.lengthSq() < 1e-4) {
+              // Port runs along the face normal (can't lie flat). Draw a short
+              // connector tube so the link is still visible rather than NaN.
+              const tube = new THREE.Mesh(
+                cylGeo,
+                filled ? waterMatStill : grooveMat
+              );
+              tube.scale.set(filled ? 0.16 : 0.13, len, filled ? 0.16 : 0.13);
+              tube.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+              tube.position.copy(watH).addScaledVector(dir, len * 0.5);
+              group.add(tube);
+              if (filled) regFill(tube);
+              continue;
+            }
+            const wAxis = cross.normalize();
             const basis = new THREE.Matrix4().makeBasis(wAxis, nrm, dir);
 
-            // dark carved groove (slightly wider than the water)
+            // shallow dark groove (sunk below the surface, frames the water)
             const bed = new THREE.Mesh(unitBox, trenchMat);
             bed.quaternion.setFromRotationMatrix(basis);
-            bed.scale.set(0.34, 0.13, len);
+            bed.scale.set(0.34, 0.1, len);
             bed.position.copy(bedH).addScaledVector(dir, len * 0.5);
             group.add(bed);
 
             if (filled) {
-              // a real sloshing water surface (displaced subdivided plane)
+              // a real sloshing water surface (displaced subdivided plane),
+              // sitting proud of the groove so it is clearly visible.
+              // NB: the basis must be RIGHT-handed (det +1) or setFromRotation-
+              // Matrix yields a broken/flipped quaternion. col0 x col1 == col2:
+              //   (dir x nrm) x dir == nrm  ✓
               const surf = new THREE.Mesh(waterSurfaceGeo, waterMat);
-              const sbasis = new THREE.Matrix4().makeBasis(wAxis, dir, nrm);
+              const bitan = new THREE.Vector3().crossVectors(dir, nrm); // = -wAxis
+              const sbasis = new THREE.Matrix4().makeBasis(bitan, dir, nrm);
               surf.quaternion.setFromRotationMatrix(sbasis);
               surf.scale.set(0.26, len, 1);
               surf.position.copy(watH).addScaledVector(dir, len * 0.5);
               group.add(surf);
               regFill(surf);
             } else {
-              // empty groove water-bed (flat)
+              // empty groove bed (flat grey water-channel)
               const ribbon = new THREE.Mesh(unitBox, grooveMat);
               ribbon.quaternion.setFromRotationMatrix(basis);
-              ribbon.scale.set(0.2, 0.1, len);
-              ribbon.position.copy(watH).addScaledVector(dir, len * 0.5);
+              ribbon.scale.set(0.22, 0.08, len);
+              ribbon.position.copy(bedH).addScaledVector(dir, len * 0.5);
               group.add(ribbon);
             }
           }
@@ -446,8 +466,9 @@ export class CubeView {
           bedHub.position.copy(bedH);
           group.add(bedHub);
 
+          // flat hub so crossings read as continuous water, not a raised blob
           const joint = new THREE.Mesh(cylGeo, filled ? waterMatStill : grooveMat);
-          joint.scale.set(filled ? 0.18 : 0.15, 0.1, filled ? 0.18 : 0.15);
+          joint.scale.set(filled ? 0.15 : 0.13, 0.05, filled ? 0.15 : 0.13);
           joint.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), nrm);
           joint.position.copy(watH);
           group.add(joint);

@@ -110,6 +110,7 @@ export class App {
           total: this.flow.totalSinks,
         }),
         level: () => this.index,
+        orbit: (az: number, el: number) => this.scene.setOrbit(az, el),
       };
     }
   }
