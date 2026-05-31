@@ -3,7 +3,7 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
 import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
-import { CubeState, NO_FACE, SINK, SOURCE } from '../game/CubeState';
+import { CubeState, SINK, SOURCE } from '../game/CubeState';
 import { FlowResult } from '../game/Flow';
 import { ALL_BITS, Axis, DIRS } from '../game/dir';
 import { PALETTE } from './colors';
@@ -189,7 +189,7 @@ const waterMat = new THREE.ShaderMaterial({
     uDeep: { value: new THREE.Color(PALETTE.waterDeep) },
     uSpeed: { value: 1.05 },
     uOpacity: { value: 0.93 },
-    uAmp: { value: 0.04 },
+    uAmp: { value: 0.025 },
   },
   side: THREE.DoubleSide,
   vertexShader: /* glsl */ `
@@ -390,84 +390,158 @@ export class CubeView {
 
           if (ports === 0) continue;
 
-          // The face this cell's channel lives on. We prefer the per-piece
-          // stored face (so canals rotate rigidly with the cube), but only if
-          // that face is still EXPOSED on the surface. If a rotation has turned
-          // it inward, we re-project to an exposed face so a canal is always
-          // visible — water never appears to flow without a channel.
-          const fd = cube.face[i];
-          const nrm =
-            fd !== NO_FACE && isExposedFace(x, y, z, fd, n)
-              ? dirVec(DIRS[fd])
-              : outerNormal(x, y, z, n);
-          // R = cubelet face. Canals are walled channels carved on the face.
+          // Canals live on the cube SURFACE only. Every groove is drawn on an
+          // exposed face, and a connection between two cells is always shown as
+          // a continuous channel: either two coplanar arms meeting in the gap,
+          // or — when the path turns a corner of the cube — a groove that wraps
+          // around the shared cube edge. Water never disappears into the solid.
           const R = this.size * 0.5;
           const half = SPACING * 0.5;
-          const floorH = nrm.clone().multiplyScalar(R - 0.01); // channel floor
-          const waterH = nrm.clone().multiplyScalar(R + 0.05); // water surface
-          const wallH = nrm.clone().multiplyScalar(R + 0.04); // raised wall centre
           const UP = new THREE.Vector3(0, 1, 0);
           const FWD = new THREE.Vector3(0, 0, 1);
 
-          // A walled canal arm running from the cell centre toward `dir`.
-          const drawArm = (dir: THREE.Vector3, len: number, isFilled: boolean) => {
-            const wb = new THREE.Vector3().crossVectors(nrm, dir);
-            if (wb.lengthSq() < 1e-4) {
-              // port runs along the normal (into the cube) -> short tube
-              const tube = new THREE.Mesh(
-                cylGeo,
-                isFilled ? waterMatStill : grooveMat
-              );
-              tube.scale.set(isFilled ? 0.14 : 0.12, len, isFilled ? 0.14 : 0.12);
-              tube.quaternion.setFromUnitVectors(UP, dir);
-              tube.position.copy(waterH).addScaledVector(dir, len * 0.5);
-              group.add(tube);
-              if (isFilled) regFill(tube);
-              return;
+          // Which of a cell's six faces are exposed (neighbour is off the cube).
+          const exposedOf = (cx: number, cy: number, cz: number): number[] => {
+            const out: number[] = [];
+            for (let f = 0; f < 6; f++) {
+              const d = DIRS[f];
+              const ax = cx + d.x,
+                ay = cy + d.y,
+                az = cz + d.z;
+              if (ax < 0 || ax >= n || ay < 0 || ay >= n || az < 0 || az >= n)
+                out.push(f);
             }
+            return out;
+          };
+          const myFaces = exposedOf(x, y, z);
+          const vec = (di: number) =>
+            new THREE.Vector3(DIRS[di].x, DIRS[di].y, DIRS[di].z);
+          const perp = (a: number, b: number) =>
+            DIRS[a].x * DIRS[b].x + DIRS[a].y * DIRS[b].y + DIRS[a].z * DIRS[b].z ===
+            0;
+
+          // A walled trough arm on `faceNrm`, running from the cell centre toward
+          // in-plane direction `dir` for length `len`.
+          const drawArm = (
+            faceNrm: THREE.Vector3,
+            dir: THREE.Vector3,
+            len: number,
+            isFilled: boolean,
+            lift = 0
+          ) => {
+            const wb = new THREE.Vector3().crossVectors(faceNrm, dir);
+            if (wb.lengthSq() < 1e-4) return; // dir not in this face plane
             wb.normalize();
-            const boxB = new THREE.Matrix4().makeBasis(wb, nrm, dir); // right-handed
-            // channel floor
-            const floor = new THREE.Mesh(unitBox, trenchMat);
+            // Each arm is lifted a hair more than the last so overlapping
+            // arms at a junction layer cleanly instead of z-fighting.
+            const floorH = faceNrm.clone().multiplyScalar(R - 0.01 + lift);
+            const waterH = faceNrm.clone().multiplyScalar(R + 0.045 + lift);
+            const wallH = faceNrm.clone().multiplyScalar(R + 0.01 + lift);
+            const boxB = new THREE.Matrix4().makeBasis(wb, faceNrm, dir);
+            const floor = new THREE.Mesh(unitBox, grooveMat);
             floor.quaternion.setFromRotationMatrix(boxB);
-            floor.scale.set(0.3, 0.06, len);
+            floor.scale.set(0.34, 0.06, len);
             floor.position.copy(floorH).addScaledVector(dir, len * 0.5);
             group.add(floor);
-            // two raised walls framing the channel
             for (const s of [1, -1]) {
               const wall = new THREE.Mesh(unitBox, trenchMat);
               wall.quaternion.setFromRotationMatrix(boxB);
-              wall.scale.set(0.06, 0.2, len);
+              wall.scale.set(0.05, 0.12, len);
               wall.position
                 .copy(wallH)
                 .addScaledVector(dir, len * 0.5)
-                .addScaledVector(wb, 0.15 * s);
+                .addScaledVector(wb, 0.155 * s);
               group.add(wall);
             }
-            // water surface (displaced plane) or empty groove
             if (isFilled) {
               const surf = new THREE.Mesh(waterSurfaceGeo, waterMat);
-              // RIGHT-handed basis (col0 x col1 == col2): (dir x nrm) x dir == nrm
+              // RIGHT-handed basis (col0 x col1 == col2): (dir x faceNrm) x dir
               const planeB = new THREE.Matrix4().makeBasis(
                 wb.clone().negate(),
                 dir,
-                nrm
+                faceNrm
               );
               surf.quaternion.setFromRotationMatrix(planeB);
-              surf.scale.set(0.22, len, 1);
+              surf.scale.set(0.27, len, 1);
               surf.position.copy(waterH).addScaledVector(dir, len * 0.5);
               group.add(surf);
               regFill(surf);
             } else {
-              const ribbon = new THREE.Mesh(unitBox, grooveMat);
-              ribbon.quaternion.setFromRotationMatrix(boxB);
-              ribbon.scale.set(0.2, 0.05, len);
-              ribbon.position.copy(floorH).addScaledVector(dir, len * 0.5);
-              group.add(ribbon);
+              const hollow = new THREE.Mesh(unitBox, trenchMat);
+              hollow.quaternion.setFromRotationMatrix(boxB);
+              hollow.scale.set(0.22, 0.04, len);
+              hollow.position
+                .copy(floorH)
+                .addScaledVector(faceNrm, 0.028)
+                .addScaledVector(dir, len * 0.5);
+              group.add(hollow);
             }
           };
 
-          // An outlet/leak hole seated on the cell's `dir` face.
+          // A ribbon swept along the cube's ROUNDED edge — the channel literally
+          // curves from one face to the next, so nothing is bolted on. Returns a
+          // mesh built from a quarter-arc of the edge fillet.
+          const edgeR = this.size * 0.12; // matches RoundedBoxGeometry radius
+          const cornerRibbon = (
+            nA: THREE.Vector3,
+            nB: THREE.Vector3,
+            width: number,
+            proud: number,
+            mat: THREE.Material,
+            track: boolean
+          ) => {
+            const u = new THREE.Vector3().crossVectors(nA, nB).normalize(); // edge
+            const inner = nA.clone().add(nB).multiplyScalar(R - edgeR); // fillet axis
+            const SEG = 10;
+            const pos: number[] = [];
+            const nrm: number[] = [];
+            const uv: number[] = [];
+            const idx: number[] = [];
+            for (let i = 0; i <= SEG; i++) {
+              const ph = (i / SEG) * (Math.PI / 2);
+              const radial = nA
+                .clone()
+                .multiplyScalar(Math.cos(ph))
+                .addScaledVector(nB, Math.sin(ph)); // unit surface normal
+              const c = inner.clone().addScaledVector(radial, edgeR + proud);
+              const l = c.clone().addScaledVector(u, width / 2);
+              const r = c.clone().addScaledVector(u, -width / 2);
+              pos.push(l.x, l.y, l.z, r.x, r.y, r.z);
+              nrm.push(radial.x, radial.y, radial.z, radial.x, radial.y, radial.z);
+              uv.push(0, i / SEG, 1, i / SEG);
+            }
+            for (let i = 0; i < SEG; i++) {
+              const a = i * 2;
+              idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+            }
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+            g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+            g.setIndex(idx);
+            const m = new THREE.Mesh(g, mat);
+            group.add(m);
+            if (track) regFill(m);
+          };
+
+          // Wrap a connection around the edge shared by faces `fa` and `fb`:
+          // straight arms up to (just shy of) the edge, then a curved ribbon that
+          // rides the rounded fillet across to the other face.
+          const drawWrap = (fa: number, fb: number, isFilled: boolean) => {
+            const nA = vec(fa);
+            const nB = vec(fb);
+            drawArm(nA, nB, R - 0.03, isFilled, 0.006); // up face A toward edge
+            drawArm(nB, nA, R - 0.03, isFilled, 0.006); // up face B toward edge
+            if (isFilled) {
+              cornerRibbon(nA, nB, 0.34, 0.0, grooveMat, false); // bed
+              cornerRibbon(nA, nB, 0.27, 0.05, waterMat, true); // water
+            } else {
+              cornerRibbon(nA, nB, 0.34, 0.0, grooveMat, false); // bed
+              cornerRibbon(nA, nB, 0.22, 0.03, trenchMat, false); // dark line
+            }
+          };
+
+          // An outlet/leak hole pointing straight out of face `dir`.
           const drawHole = (dir: THREE.Vector3, isFilled: boolean) => {
             const isOutlet = isSource || isSink;
             const rmat = isSource
@@ -484,15 +558,15 @@ export class CubeView {
             const ring = new THREE.Mesh(ringGeo, rmat);
             ring.quaternion.setFromUnitVectors(FWD, dir);
             ring.position.copy(dir).multiplyScalar(R + 0.03);
-            ring.scale.setScalar(isSource ? 1.0 : isSink ? 1.12 : 0.58);
+            ring.scale.setScalar(isSource ? 0.92 : isSink ? 0.95 : 0.52);
             ring.renderOrder = 3;
             group.add(ring);
             if (isFilled) {
               const plug = new THREE.Mesh(cylGeo, waterMatStill);
-              const pr = isOutlet ? 0.16 : 0.1;
-              plug.scale.set(pr, 0.3, pr);
+              const pr = isOutlet ? 0.13 : 0.08;
+              plug.scale.set(pr, 0.22, pr);
               plug.quaternion.setFromUnitVectors(UP, dir);
-              plug.position.copy(dir).multiplyScalar(R + 0.1);
+              plug.position.copy(dir).multiplyScalar(R + 0.07);
               plug.renderOrder = 2;
               group.add(plug);
               regFill(plug);
@@ -506,39 +580,58 @@ export class CubeView {
             }
           };
 
+          // ---- assign each port to a surface face -------------------------
+          // Internal ports become an arm on a perpendicular face that the
+          // neighbour also exposes (so the two arms are coplanar and meet).
+          // Outward ports become an outlet/leak hole on that exposed face.
+          const armsOnFace = new Map<number, number[]>(); // face -> port dirs
+          const activeFaces = new Set<number>();
+          const outletDirs: number[] = [];
           for (let di = 0; di < 6; di++) {
             if (!(ports & ALL_BITS[di])) continue;
             const d = DIRS[di];
-            const dir = new THREE.Vector3(d.x, d.y, d.z);
             const nx = x + d.x,
               ny = y + d.y,
               nz = z + d.z;
             const outside =
               nx < 0 || nx >= n || ny < 0 || ny >= n || nz < 0 || nz >= n;
-            const along = dir.dot(nrm);
-
-            // Draw a canal toward every port that lies in the face plane — this
-            // includes outlet ports, so a hole always has a channel leading to
-            // it. Ports along the normal are either the vertical spout (outward,
-            // no arm) or a hidden inward link (short tube).
-            if (Math.abs(along) < 0.5) drawArm(dir, outside ? half : half + 0.04, filled);
-            else if (along <= -0.5) drawArm(dir, half * 0.7, filled);
-
-            if (outside) drawHole(dir, filled);
+            if (outside) {
+              outletDirs.push(di);
+              activeFaces.add(di); // the hole + its hub live on face di
+              continue;
+            }
+            const nbFaces = exposedOf(nx, ny, nz);
+            let chosen = -1;
+            for (const f of myFaces) {
+              if (!perp(f, di)) continue; // arm must lie in the face plane
+              if (nbFaces.includes(f)) {
+                chosen = f; // shared face → coplanar meet, ideal
+                break;
+              }
+              if (chosen < 0) chosen = f; // fallback: still a valid exposed face
+            }
+            if (chosen < 0) chosen = myFaces[0] ?? di;
+            if (!armsOnFace.has(chosen)) armsOnFace.set(chosen, []);
+            armsOnFace.get(chosen)!.push(di);
+            activeFaces.add(chosen);
           }
 
-          // joint hub where canals cross
-          const bedHub = new THREE.Mesh(cylGeo, trenchMat);
-          bedHub.scale.set(0.2, 0.1, 0.2);
-          bedHub.quaternion.setFromUnitVectors(UP, nrm);
-          bedHub.position.copy(floorH);
-          group.add(bedHub);
-          const joint = new THREE.Mesh(cylGeo, filled ? waterMatStill : grooveMat);
-          joint.scale.set(filled ? 0.15 : 0.13, 0.05, filled ? 0.15 : 0.13);
-          joint.quaternion.setFromUnitVectors(UP, nrm);
-          joint.position.copy(waterH);
-          group.add(joint);
-          if (filled) regFill(joint);
+          // ---- draw it ----------------------------------------------------
+          // Arms run from the cell centre, so every junction is already covered
+          // by the arms overlapping there — no hub disc needed. Each successive
+          // arm on a face is lifted slightly so overlaps layer without flicker.
+          for (const [f, dirs] of armsOnFace) {
+            const fn = vec(f);
+            dirs.forEach((di, k) =>
+              drawArm(fn, vec(di), half + 0.07, filled, k * 0.012)
+            );
+          }
+          for (const di of outletDirs) drawHole(vec(di), filled);
+          const af = [...activeFaces];
+          // Stitch all of this cell's active faces into one network. They are
+          // mutually perpendicular (a shell cell never exposes opposite faces),
+          // so a star of edge-wraps from the first face reaches them all.
+          for (let k = 1; k < af.length; k++) drawWrap(af[0], af[k], filled);
         }
       }
     }
@@ -551,10 +644,10 @@ export class CubeView {
     base: THREE.Vector3,
     delay = 0
   ) {
-    const count = kind === 'fountain' ? 8 : 6;
+    const count = kind === 'fountain' ? 6 : 4;
     for (let k = 0; k < count; k++) {
       const mesh = new THREE.Mesh(dropGeo, waterDropMat);
-      mesh.scale.setScalar(0.085 + (k % 3) * 0.02);
+      mesh.scale.setScalar(0.07 + (k % 3) * 0.018);
       group.add(mesh);
       this.droplets.push({
         mesh,
@@ -782,38 +875,4 @@ export class CubeView {
   endLayer() {
     this.endLayerCancel();
   }
-}
-
-/**
- * Pick the most camera-facing exterior face for a shell cell, so its channel is
- * drawn on a visible surface. Priority: top, then the two front faces, then the
- * back/bottom faces.
- */
-function dirVec(d: { x: number; y: number; z: number }): THREE.Vector3 {
-  return new THREE.Vector3(d.x, d.y, d.z);
-}
-
-/** True if the face direction `fd` points out of the cube at this cell. */
-function isExposedFace(
-  x: number,
-  y: number,
-  z: number,
-  fd: number,
-  n: number
-): boolean {
-  const d = DIRS[fd];
-  const nx = x + d.x,
-    ny = y + d.y,
-    nz = z + d.z;
-  return nx < 0 || nx >= n || ny < 0 || ny >= n || nz < 0 || nz >= n;
-}
-
-function outerNormal(x: number, y: number, z: number, n: number): THREE.Vector3 {
-  if (y === n - 1) return new THREE.Vector3(0, 1, 0);
-  if (x === n - 1) return new THREE.Vector3(1, 0, 0);
-  if (z === n - 1) return new THREE.Vector3(0, 0, 1);
-  if (x === 0) return new THREE.Vector3(-1, 0, 0);
-  if (z === 0) return new THREE.Vector3(0, 0, -1);
-  if (y === 0) return new THREE.Vector3(0, -1, 0);
-  return new THREE.Vector3(0, 1, 0);
 }
