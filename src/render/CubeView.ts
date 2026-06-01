@@ -425,7 +425,8 @@ export class CubeView {
             len: number,
             isFilled: boolean,
             lift = 0,
-            bankInset = 0
+            bankInset = 0,
+            near = 0
           ) => {
             const wb = new THREE.Vector3().crossVectors(faceNrm, dir);
             if (wb.lengthSq() < 1e-4) return; // dir not in this face plane
@@ -436,15 +437,19 @@ export class CubeView {
             const waterH = faceNrm.clone().multiplyScalar(R + 0.045 + lift);
             const wallH = faceNrm.clone().multiplyScalar(R + 0.01 + lift);
             const boxB = new THREE.Matrix4().makeBasis(wb, faceNrm, dir);
+            // The arm runs from `near` (out from centre) to `len`.
+            const span = Math.max(0.02, len - near);
+            const mid = (near + len) / 2;
             const floor = new THREE.Mesh(unitBox, grooveMat);
             floor.quaternion.setFromRotationMatrix(boxB);
-            floor.scale.set(0.34, 0.06, len);
-            floor.position.copy(floorH).addScaledVector(dir, len * 0.5);
+            floor.scale.set(0.34, 0.06, span);
+            floor.position.copy(floorH).addScaledVector(dir, mid);
             group.add(floor);
-            // Banks start `bankInset` out from the cell centre so that at a
-            // junction they frame each arm without crossing through the middle.
-            const bLen = Math.max(0.02, len - bankInset);
-            const bMid = (bankInset + len) / 2;
+            // Banks start `bankInset` further out so that at a basin junction
+            // they frame each arm without crossing through the middle.
+            const bStart = near + bankInset;
+            const bLen = Math.max(0.02, len - bStart);
+            const bMid = (bStart + len) / 2;
             for (const s of [1, -1]) {
               const wall = new THREE.Mesh(unitBox, trenchMat);
               wall.quaternion.setFromRotationMatrix(boxB);
@@ -464,19 +469,130 @@ export class CubeView {
                 faceNrm
               );
               surf.quaternion.setFromRotationMatrix(planeB);
-              surf.scale.set(0.27, len, 1);
-              surf.position.copy(waterH).addScaledVector(dir, len * 0.5);
+              surf.scale.set(0.27, span, 1);
+              surf.position.copy(waterH).addScaledVector(dir, mid);
               group.add(surf);
               regFill(surf);
             } else {
               const hollow = new THREE.Mesh(unitBox, trenchMat);
               hollow.quaternion.setFromRotationMatrix(boxB);
-              hollow.scale.set(0.22, 0.04, len);
+              hollow.scale.set(0.22, 0.04, span);
               hollow.position
                 .copy(floorH)
                 .addScaledVector(faceNrm, 0.028)
-                .addScaledVector(dir, len * 0.5);
+                .addScaledVector(dir, mid);
               group.add(hollow);
+            }
+          };
+
+          // Build a triangle-strip ribbon from cross-section rows (each row is a
+          // left point, a right point, and a normal). Used for curved channel
+          // pieces that a box can't represent.
+          const strip = (
+            rows: { l: THREE.Vector3; r: THREE.Vector3; n: THREE.Vector3 }[],
+            mat: THREE.Material,
+            track: boolean
+          ) => {
+            const pos: number[] = [];
+            const nrm: number[] = [];
+            const uv: number[] = [];
+            const idx: number[] = [];
+            for (let i = 0; i < rows.length; i++) {
+              const { l, r, n } = rows[i];
+              pos.push(l.x, l.y, l.z, r.x, r.y, r.z);
+              nrm.push(n.x, n.y, n.z, n.x, n.y, n.z);
+              const tv = i / (rows.length - 1);
+              uv.push(0, tv, 1, tv);
+            }
+            for (let i = 0; i < rows.length - 1; i++) {
+              const a = i * 2;
+              idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+            }
+            const g = new THREE.BufferGeometry();
+            g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            g.setAttribute('normal', new THREE.Float32BufferAttribute(nrm, 3));
+            g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+            g.setIndex(idx);
+            const m = new THREE.Mesh(g, mat);
+            group.add(m);
+            if (track) regFill(m);
+          };
+
+          // A smooth in-plane elbow joining two perpendicular arms (a and b) on
+          // one face with a quarter-arc, so a bend reads as a curved channel
+          // rather than two boxes butting at a right angle.
+          const ELBOW_R = 0.22;
+          const drawElbow = (
+            faceNrm: THREE.Vector3,
+            a: THREE.Vector3,
+            b: THREE.Vector3,
+            isFilled: boolean
+          ) => {
+            const SEG = 8;
+            const samples = [];
+            for (let i = 0; i <= SEG; i++) {
+              const t = i / SEG;
+              const th = -(Math.PI / 2) * (1 + t); // -90° → -180°
+              const u = ELBOW_R + ELBOW_R * Math.cos(th);
+              const v = ELBOW_R + ELBOW_R * Math.sin(th);
+              const du = -ELBOW_R * Math.sin(th);
+              const dv = ELBOW_R * Math.cos(th);
+              const tang = a
+                .clone()
+                .multiplyScalar(du)
+                .addScaledVector(b, dv)
+                .normalize();
+              const perp = new THREE.Vector3().crossVectors(faceNrm, tang).normalize();
+              const planar = a.clone().multiplyScalar(u).addScaledVector(b, v);
+              samples.push({ perp, planar });
+            }
+            const at = (h: number, s: { perp: THREE.Vector3; planar: THREE.Vector3 }) =>
+              faceNrm.clone().multiplyScalar(h).add(s.planar);
+            // floor bed
+            strip(
+              samples.map((s) => ({
+                l: at(R - 0.01, s).addScaledVector(s.perp, 0.17),
+                r: at(R - 0.01, s).addScaledVector(s.perp, -0.17),
+                n: faceNrm,
+              })),
+              grooveMat,
+              false
+            );
+            if (isFilled) {
+              strip(
+                samples.map((s) => ({
+                  l: at(R + 0.045, s).addScaledVector(s.perp, 0.135),
+                  r: at(R + 0.045, s).addScaledVector(s.perp, -0.135),
+                  n: faceNrm,
+                })),
+                waterMat,
+                true
+              );
+            } else {
+              strip(
+                samples.map((s) => ({
+                  l: at(R + 0.018, s).addScaledVector(s.perp, 0.11),
+                  r: at(R + 0.018, s).addScaledVector(s.perp, -0.11),
+                  n: faceNrm,
+                })),
+                trenchMat,
+                false
+              );
+            }
+            // two curved banks
+            for (const sgn of [1, -1]) {
+              strip(
+                samples.map((s) => {
+                  const base = at(R + 0.01, s).addScaledVector(s.perp, 0.155 * sgn);
+                  return {
+                    l: base.clone().addScaledVector(faceNrm, -0.06),
+                    r: base.clone().addScaledVector(faceNrm, 0.06),
+                    n: s.perp.clone().multiplyScalar(sgn),
+                  };
+                }),
+                trenchMat,
+                false
+              );
             }
           };
 
@@ -653,12 +769,17 @@ export class CubeView {
           for (const [f, dirs] of armsOnFace) {
             const fn = vec(f);
             const axes = new Set(dirs.map((di) => di >> 1));
-            const junction = axes.size >= 2;
-            const inset = junction ? 0.17 : 0;
-            dirs.forEach((di, k) =>
-              drawArm(fn, vec(di), half + 0.07, filled, k * 0.012, inset)
-            );
-            if (junction) {
+            if (dirs.length === 2 && axes.size === 2) {
+              // L-bend: stop the arms short and join them with a curved elbow.
+              dirs.forEach((di, k) =>
+                drawArm(fn, vec(di), half + 0.07, filled, k * 0.012, 0, ELBOW_R)
+              );
+              drawElbow(fn, vec(dirs[0]), vec(dirs[1]), filled);
+            } else if (axes.size >= 2) {
+              // T / cross: inset banks and cap the open sides to form a basin.
+              dirs.forEach((di, k) =>
+                drawArm(fn, vec(di), half + 0.07, filled, k * 0.012, 0.17)
+              );
               for (let dd = 0; dd < 6; dd++) {
                 const inPlane =
                   DIRS[f].x * DIRS[dd].x +
@@ -667,6 +788,11 @@ export class CubeView {
                   0;
                 if (inPlane && !dirs.includes(dd)) drawEndCap(fn, vec(dd));
               }
+            } else {
+              // straight pass-through or single dead-end arm
+              dirs.forEach((di, k) =>
+                drawArm(fn, vec(di), half + 0.07, filled, k * 0.012)
+              );
             }
           }
           for (const di of outletDirs) drawHole(vec(di), filled);
