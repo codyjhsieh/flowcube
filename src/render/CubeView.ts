@@ -596,24 +596,6 @@ export class CubeView {
             }
           };
 
-          // A short bank closing one side of a junction basin (a side with no
-          // arm) so the central pool stays contained and reads as a clean
-          // intersection rather than open, criss-crossing strips.
-          const drawEndCap = (faceNrm: THREE.Vector3, d4: THREE.Vector3) => {
-            const along = new THREE.Vector3()
-              .crossVectors(faceNrm, d4)
-              .normalize();
-            const basis = new THREE.Matrix4().makeBasis(along, faceNrm, d4);
-            const wall = new THREE.Mesh(unitBox, trenchMat);
-            wall.quaternion.setFromRotationMatrix(basis);
-            wall.scale.set(0.36, 0.12, 0.05);
-            wall.position
-              .copy(faceNrm)
-              .multiplyScalar(R + 0.01)
-              .addScaledVector(d4, 0.19);
-            group.add(wall);
-          };
-
           // A ribbon swept along the cube's ROUNDED edge — the channel literally
           // curves from one face to the next, so nothing is bolted on. Returns a
           // mesh built from a quarter-arc of the edge fillet.
@@ -776,18 +758,23 @@ export class CubeView {
               );
               drawElbow(fn, vec(dirs[0]), vec(dirs[1]), filled);
             } else if (axes.size >= 2) {
-              // T / cross: inset banks and cap the open sides to form a basin.
+              // T / cross: inset the banks and round the centre into a flush
+              // pool so the meeting reads smoothly instead of a boxy basin.
               dirs.forEach((di, k) =>
                 drawArm(fn, vec(di), half + 0.07, filled, k * 0.012, 0.17)
               );
-              for (let dd = 0; dd < 6; dd++) {
-                const inPlane =
-                  DIRS[f].x * DIRS[dd].x +
-                    DIRS[f].y * DIRS[dd].y +
-                    DIRS[f].z * DIRS[dd].z ===
-                  0;
-                if (inPlane && !dirs.includes(dd)) drawEndCap(fn, vec(dd));
-              }
+              const pool = new THREE.Mesh(
+                holeGeo,
+                filled ? waterMatStill : grooveMat
+              );
+              pool.quaternion.setFromUnitVectors(FWD, fn);
+              pool.position
+                .copy(fn)
+                .multiplyScalar(filled ? R + 0.045 : R - 0.005);
+              pool.scale.setScalar(0.95);
+              pool.renderOrder = 1;
+              group.add(pool);
+              if (filled) regFill(pool);
             } else {
               // straight pass-through or single dead-end arm
               dirs.forEach((di, k) =>
