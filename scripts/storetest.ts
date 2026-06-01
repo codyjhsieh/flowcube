@@ -37,6 +37,30 @@ let mismatch = 0;
 let checked = 0;
 let states = 0;
 
+// The EXACT face the renderer draws an arm on, including the owner rule.
+const renderedFace = (c: CubeState, x: number, y: number, z: number, di: number): number => {
+  const d = DIRS[di];
+  const nx = x + d.x,
+    ny = y + d.y,
+    nz = z + d.z;
+  if (!inb(nx) || !inb(ny) || !inb(nz)) return -1;
+  const i = c.idx(x, y, z);
+  const my = exposed(x, y, z);
+  const stored = c.armFace[i * 6 + di];
+  let chosen = stored !== NO_FACE ? stored : (my[0] ?? di);
+  const ni = c.idx(nx, ny, nz);
+  const opp = oppositeIndex(di);
+  if (
+    c.ports[ni] & ALL_BITS[opp] &&
+    c.piece[ni] >= 0 &&
+    c.piece[ni] < c.piece[i] &&
+    c.armFace[ni * 6 + opp] !== NO_FACE
+  ) {
+    chosen = c.armFace[ni * 6 + opp];
+  }
+  return chosen;
+};
+
 const audit = (c: CubeState) => {
   states++;
   for (let x = 0; x < N; x++)
@@ -53,14 +77,14 @@ const audit = (c: CubeState) => {
             ny = y + d.y,
             nz = z + d.z;
           if (!inb(nx) || !inb(ny) || !inb(nz)) continue; // outlet
-          const f = c.armFace[i * 6 + di];
-          // validity
-          if (f === NO_FACE || !my.includes(f) || !perp(f, di)) invalid++;
-          // mutual-connection agreement
+          const f = renderedFace(c, x, y, z, di);
+          // validity: must be a real exposed face perpendicular to the port
+          if (f < 0 || !my.includes(f) || !perp(f, di)) invalid++;
+          // mutual-connection agreement (with the owner rule applied)
           const ni = c.idx(nx, ny, nz);
           if (c.ports[ni] & ALL_BITS[oppositeIndex(di)]) {
             checked++;
-            if (c.armFace[ni * 6 + oppositeIndex(di)] !== f) mismatch++;
+            if (renderedFace(c, nx, ny, nz, oppositeIndex(di)) !== f) mismatch++;
           }
         }
       }

@@ -424,7 +424,8 @@ export class CubeView {
             dir: THREE.Vector3,
             len: number,
             isFilled: boolean,
-            lift = 0
+            lift = 0,
+            bankInset = 0
           ) => {
             const wb = new THREE.Vector3().crossVectors(faceNrm, dir);
             if (wb.lengthSq() < 1e-4) return; // dir not in this face plane
@@ -440,13 +441,17 @@ export class CubeView {
             floor.scale.set(0.34, 0.06, len);
             floor.position.copy(floorH).addScaledVector(dir, len * 0.5);
             group.add(floor);
+            // Banks start `bankInset` out from the cell centre so that at a
+            // junction they frame each arm without crossing through the middle.
+            const bLen = Math.max(0.02, len - bankInset);
+            const bMid = (bankInset + len) / 2;
             for (const s of [1, -1]) {
               const wall = new THREE.Mesh(unitBox, trenchMat);
               wall.quaternion.setFromRotationMatrix(boxB);
-              wall.scale.set(0.05, 0.12, len);
+              wall.scale.set(0.05, 0.12, bLen);
               wall.position
                 .copy(wallH)
-                .addScaledVector(dir, len * 0.5)
+                .addScaledVector(dir, bMid)
                 .addScaledVector(wb, 0.155 * s);
               group.add(wall);
             }
@@ -473,6 +478,24 @@ export class CubeView {
                 .addScaledVector(dir, len * 0.5);
               group.add(hollow);
             }
+          };
+
+          // A short bank closing one side of a junction basin (a side with no
+          // arm) so the central pool stays contained and reads as a clean
+          // intersection rather than open, criss-crossing strips.
+          const drawEndCap = (faceNrm: THREE.Vector3, d4: THREE.Vector3) => {
+            const along = new THREE.Vector3()
+              .crossVectors(faceNrm, d4)
+              .normalize();
+            const basis = new THREE.Matrix4().makeBasis(along, faceNrm, d4);
+            const wall = new THREE.Mesh(unitBox, trenchMat);
+            wall.quaternion.setFromRotationMatrix(basis);
+            wall.scale.set(0.36, 0.12, 0.05);
+            wall.position
+              .copy(faceNrm)
+              .multiplyScalar(R + 0.01)
+              .addScaledVector(d4, 0.19);
+            group.add(wall);
           };
 
           // A ribbon swept along the cube's ROUNDED edge — the channel literally
@@ -600,21 +623,51 @@ export class CubeView {
               continue;
             }
             const stored = cube.armFace[i * 6 + di];
-            const chosen = stored !== NO_FACE ? stored : (myFaces[0] ?? di);
+            let chosen = stored !== NO_FACE ? stored : (myFaces[0] ?? di);
+            // On a mutual connection both cells defer to the lower-id piece's
+            // stored face. A face perpendicular to the connection is exposed on
+            // both cells, so the owner's choice is always valid on this cell too
+            // — guaranteeing the two arms meet even at a freshly-formed edge.
+            const ni = cube.idx(nx, ny, nz);
+            const opp = di ^ 1;
+            if (
+              cube.ports[ni] & ALL_BITS[opp] &&
+              cube.piece[ni] >= 0 &&
+              cube.piece[ni] < cube.piece[i]
+            ) {
+              const nbFace = cube.armFace[ni * 6 + opp];
+              if (nbFace !== NO_FACE) chosen = nbFace;
+            }
             if (!armsOnFace.has(chosen)) armsOnFace.set(chosen, []);
             armsOnFace.get(chosen)!.push(di);
             activeFaces.add(chosen);
           }
 
           // ---- draw it ----------------------------------------------------
-          // Arms run from the cell centre, so every junction is already covered
-          // by the arms overlapping there — no hub disc needed. Each successive
-          // arm on a face is lifted slightly so overlaps layer without flicker.
+          // Arms run from the cell centre, so the centre is already covered by
+          // the arms overlapping there — no hub disc needed. Where two or more
+          // arms meet on one face (a bend / T / cross) we inset their banks and
+          // cap the open sides, so the intersection reads as one smooth basin
+          // instead of criss-crossing strips. Each arm is lifted a hair so the
+          // overlapping water layers without z-fighting.
           for (const [f, dirs] of armsOnFace) {
             const fn = vec(f);
+            const axes = new Set(dirs.map((di) => di >> 1));
+            const junction = axes.size >= 2;
+            const inset = junction ? 0.17 : 0;
             dirs.forEach((di, k) =>
-              drawArm(fn, vec(di), half + 0.07, filled, k * 0.012)
+              drawArm(fn, vec(di), half + 0.07, filled, k * 0.012, inset)
             );
+            if (junction) {
+              for (let dd = 0; dd < 6; dd++) {
+                const inPlane =
+                  DIRS[f].x * DIRS[dd].x +
+                    DIRS[f].y * DIRS[dd].y +
+                    DIRS[f].z * DIRS[dd].z ===
+                  0;
+                if (inPlane && !dirs.includes(dd)) drawEndCap(fn, vec(dd));
+              }
+            }
           }
           for (const di of outletDirs) drawHole(vec(di), filled);
           const af = [...activeFaces];
